@@ -19,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.CanvasOverlay
 import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.StaticOverlaySettings
 import com.autoclip.viralai.domain.metadata.TimedWord
 import com.autoclip.viralai.domain.processing.TimedFaceCrop
 import com.autoclip.viralai.domain.subtitles.SubtitleAnimation
@@ -280,19 +281,20 @@ private class WordSubtitleOverlay(
 ) : CanvasOverlay(true) {
     private val preset = SubtitlePresets.all.firstOrNull { it.id == presetId }
         ?: SubtitlePresets.all.first { it.id == "classic" }
+    private val subtitleStyle = style
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = style.textArgb.toInt()
+        color = subtitleStyle.textArgb.toInt()
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(
             if (preset.id == "classic" || preset.id == "elegant" || preset.id == "cinematic") "sans-serif" else "sans-serif-black",
             if (preset.id == "classic" || preset.id == "elegant" || preset.id == "cinematic") Typeface.NORMAL else Typeface.BOLD,
         )
-        setShadowLayer(style.shadowFraction * 1920f, 0f, style.shadowFraction * 1920f * 0.55f, style.outlineArgb.toInt())
+        setShadowLayer(subtitleStyle.shadowFraction * 1920f, 0f, subtitleStyle.shadowFraction * 1920f * 0.55f, subtitleStyle.outlineArgb.toInt())
     }
     private val typeface = Typeface.createFromAsset(context.assets, preset.fontAsset)
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(205, 0, 0, 0) }
 
-    override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings = OverlaySettings.Builder()
+    override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings = StaticOverlaySettings.Builder()
         .setAlphaScale(1f)
         .build()
 
