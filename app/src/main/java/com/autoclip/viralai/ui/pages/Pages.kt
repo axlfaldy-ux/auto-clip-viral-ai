@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -515,7 +516,7 @@ private fun SubtitleFontPreview(text: String, fontAsset: String, style: Subtitle
         if (style.outlineFraction > 0f) {
             paint.style = Paint.Style.STROKE
             paint.strokeJoin = Paint.Join.ROUND
-            paint.strokeWidth = textSize * style.outlineFraction / style.sizeFraction
+            paint.strokeWidth = paint.textSize * style.outlineFraction / style.sizeFraction
             paint.color = style.outlineArgb.toInt()
             canvas.drawText(shown, centerX, baseline, paint)
             paint.style = Paint.Style.FILL
