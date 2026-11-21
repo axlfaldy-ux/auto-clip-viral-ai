@@ -2,16 +2,17 @@
 
 Aplikasi Android native Kotlin + Jetpack Compose, dibangun lewat GitHub Actions.
 
-## Tahap 1 tersedia
+## Fitur yang tersedia
 
 - Home dan impor video lokal melalui Android Storage Access Framework.
-- Clip Results yang menunjukkan status nyata setiap komponen; belum menampilkan klip palsu.
-- Subtitle Studio dengan delapan preset yang dapat dipilih manual dan disimpan lokal. Pratinjau masih statis; renderer/animasi ekspor belum dibuat.
+- Clip Results dengan pemotongan video lokal, crop tengah 9:16, dan simpan ke galeri melalui Media3 Transformer.
+- Pemilihan klip otomatis melalui backend HTTPS yang dikonfigurasi pengguna; tidak ada analisis tiruan di aplikasi.
+- Subtitle Studio dengan delapan font lokal, kontrol ukuran/warna/outline/shadow/posisi, serta tujuh mode gerak kamera. Preview dan ekspor menggunakan font asset yang sama.
 - Metadata Studio dengan 5 judul, 3 hook, caption berbasis kutipan transkrip, hashtag per platform, 4 CTA, edit, regenerate, salin, dan penyimpanan lokal per ID.
-- Batas domain target klip 30–60 detik serta ekspor 9:16 1080×1920.
-- `LocalClipWorkflow` mengatur urutan transkripsi satu kali, seleksi, speaker tracking, ekspor, lalu metadata per klip; engine konkrit belum tersedia.
+- Pengaturan potongan 30–60 detik jika durasi sumber mencukupi, target 1080×1920, serta penyimpanan hasil ke galeri.
+- Metadata lokal berdasarkan transkrip tetap tersedia.
 
-Generator metadata saat ini adalah ekstraksi kata kunci + aturan lokal dari transkrip yang diberikan pengguna. Ia bukan model generatif dan tidak memiliki data tren real-time. Pemroses video, ASR, seleksi otomatis, speaker tracking, subtitle rendering, serta ekspor belum berjalan.
+Pemotongan/crop/ekspor/font overlay dan gerak kamera generik berjalan lokal melalui Media3. Subtitle kata, emphasis zoom, dan auto-reframe wajah memakai timestamp/keyframe dari backend HTTPS. Seleksi viral dan transkripsi otomatis memerlukan backend; aplikasi mengunggah video hanya ketika pengguna meminta analisis. Backend harus mengikuti kontrak pada `docs/ARCHITECTURE.md`; kredensial dan model AI dikelola di server, bukan ditanam dalam APK. Repository tidak menyertakan FFmpeg, maka renderer memakai Media3 yang sudah ada. Generator metadata tetap lokal, extractive, dan bukan data tren real-time.
 
 ## Build APK
 

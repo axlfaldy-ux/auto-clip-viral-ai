@@ -1,14 +1,14 @@
 # Arsitektur Auto Clip Viral AI
 
-## Batas Tahap 1
+## Implementasi saat ini
 
-Tahap ini membangun UI Android, alur impor video lokal, katalog preset subtitle, generator metadata lokal berbasis transkrip, spesifikasi produk, dan kontrak modul pemrosesan. Belum ada model ASR, AI pemilih momen, deteksi speaker, renderer subtitle, atau exporter yang dijalankan. UI menunjukkan status tersebut dan tidak menawarkan tombol untuk proses yang belum ada.
+Impor menggunakan Storage Access Framework. Pemotongan, crop 9:16, subtitle berbasis timestamp kata, gerak kamera, encoding, dan penyimpanan galeri dijalankan pada perangkat melalui Media3 Transformer. Pemilihan otomatis, transkripsi, penekanan kata, dan keyframe wajah memerlukan backend HTTPS; aplikasi tidak mengklaim mengerjakan AI secara lokal. Pelacakan wajah mengikuti keyframe backend, sedangkan identifikasi active speaker dan sinkronisasi gerak bibir harus disediakan oleh backend.
 
 ## Susunan modul
 
 ```text
 app/src/main/java/com/autoclip/viralai/
-  data/                       # implementasi repository dan akses berkas (bertahap)
+  data/                       # Media3 exporter dan klien backend analisis
   domain/
     metadata/                 # transkrip bersama, generator, penyimpanan per clipId
     processing/               # kontrak seleksi klip, speaker tracker, video exporter
@@ -25,17 +25,44 @@ UI hanya memanggil fungsi yang tersedia. Lapisan domain mendefinisikan kontrak s
 
 | Fitur | Fondasi Tahap 1 | Implementasi yang masih diperlukan |
 |---|---|---|
-| Automatic viral clip selection | `ClipSelectionEngine`, `ClipCandidate`, batas durasi 30–60 detik | ASR/VAD, scoring audio/teks/visual, pemilihan rentang dari video panjang |
-| Active speaker face tracking | `ActiveSpeakerTracker`, `TimedFaceCrop`, kata bertimestamp pada `ClipTranscript` | Face landmarks, sinkronisasi audio-gerak bibir, smoothing crop |
-| 8 subtitle templates | Katalog `SubtitlePresets`; pilihan manual disimpan lokal | Renderer animasi, kata bertimestamp, overlay saat ekspor |
+| Automatic viral clip selection | `VideoAnalysisClient` mengirim video ke `/v1/analyze`, validasi kandidat 30–60 detik, ekspor kandidat | Backend dan model analisis konten harus disediakan dan dikonfigurasi |
+| Active speaker face tracking | Analisis meminta `face_tracking` saat mode aktif; exporter mengikuti keyframe `face_crops` backend dan menginterpolasi pusat wajah/crop | Backend/model perlu mendeteksi wajah dan mencocokkan pembicara aktif dengan gerak bibir/audio; tanpa keyframe UI menonaktifkan ekspor tracking |
+| 8 subtitle templates | Delapan font asset lokal dan `WordSubtitleOverlay` memakai font, ukuran, warna, outline, shadow, posisi, dan animasi yang sama dengan preview | Perlu backend mengembalikan timestamp per kata; ekspor manual tanpa timestamp memang tidak memiliki subtitle |
+| Talking head movement | Dynamic punch, smooth zoom, jump-cut framing, subtle movement, emphasis zoom, face tracking/reframe memakai transformasi frame bertimestamp | Penanda `emphasis` dan `face_crops` berasal dari backend; jump-cut saat ini perubahan framing, bukan penghilangan jeda audio |
 | Title, hook, caption, hashtag | `LocalMetadataGenerator`, editor, preset platform, simpan/copy | Model generatif opsional bila kelak sesuai perangkat; saat ini aturan lokal, bukan LLM |
-| Video export 9:16 | `ExportProfile` dan `VideoExportEngine`; target 1080×1920 | Integrasi Media3 Transformer/MediaCodec dan validasi file hasil |
-| Durasi 30–60 detik | `ClipSpecification.acceptsDuration` dan validasi kandidat | Penegakan pada mesin seleksi dan sebelum ekspor |
+| Video export 9:16 | `VideoMediaProcessor` memakai Media3 Transformer, trim, crop, overlay, dan MediaStore | Batas encoder/format input perangkat dapat menyebabkan ekspor gagal dengan pesan error |
+| Durasi 30–60 detik | Slider manual dan validasi kandidat respons backend; klip sumber di bawah 30 detik tetap dapat dipotong manual | Durasi klip otomatis bergantung pada respons backend |
 
-`LocalClipWorkflow` mengorkestrasi kontrak yang akan diimplementasikan: transkripsi satu kali per video sumber, seleksi dan validasi durasi kandidat, speaker tracking, ekspor potret, lalu pembuatan/penyimpanan metadata untuk setiap klip yang berhasil diekspor. `ClipTranscript` dan kata bertimestamp yang sama diberikan ke seleksi, tracking, subtitle/export, dan metadata. Belum ada engine konkret atau UI yang memanggil workflow ini, jadi pemrosesan otomatis belum aktif.
+### Kontrak backend analisis
+
+Setelan menyimpan URL dasar HTTPS. Tombol analisis mengirim `POST {baseUrl}/v1/analyze` sebagai `multipart/form-data` dengan field `video` (file sumber) dan `options` (JSON: `word_timestamps`, `word_emphasis`, `face_tracking`). Backend tidak boleh mengandalkan API key yang ditanam dalam aplikasi; autentikasi dan kredensial model harus dikelola server-side.
+
+Contoh respons JSON:
+
+```json
+{
+  "clips": [
+    {
+      "start_ms": 12000,
+      "end_ms": 47000,
+      "score": 0.87,
+      "transcript": "contoh transkrip",
+      "words": [
+        { "text": "contoh", "start_ms": 12000, "end_ms": 12400, "emphasis": false },
+        { "text": "transkrip", "start_ms": 12420, "end_ms": 13100, "emphasis": true }
+      ],
+      "face_crops": [
+        { "start_ms": 12000, "end_ms": 15000, "center_x": 0.52, "center_y": 0.40, "scale": 1.08, "confidence": 0.92 }
+      ]
+    }
+  ]
+}
+```
+
+Timestamp kata dan crop wajib menggunakan waktu absolut terhadap video sumber. `words` opsional; tanpa field itu hasil diekspor tanpa subtitle dan UI menyatakannya. `face_crops` opsional untuk mode wajah; mode active-speaker/auto-reframe dinonaktifkan untuk ekspor kandidat yang tidak memiliki keyframe wajah valid. `center_x` dan `center_y` dinormalisasi pada 0–1, `scale` 1–2, dan confidence 0–1. Error HTTP, respons invalid, dan URL non-HTTPS ditampilkan ke pengguna. Batas unggah dan autentikasi perlu ditambahkan sesuai deployment backend.
 
 ## Dependensi saat ini dan rencana
 
-Dependensi build saat ini dibatasi pada AndroidX Activity, Compose UI/Foundation/Material 3, dan Compose tooling untuk debug. Tidak ada layanan berbayar atau library media/AI yang dipasang pada tahap UI.
+Dependensi mencakup AndroidX Compose dan Media3 Transformer/Effect. Tidak ada FFmpeg atau API key/backend bawaan. File font disimpan di `app/src/main/assets/fonts`; preview dan video memakai font asset yang sama. Media3 melakukan transformasi video dan overlay font secara lokal, tanpa menambah dependency berbayar.
 
-Untuk implementasi media berikutnya, jalur yang direncanakan adalah Media3 Transformer/Effect dan `MediaCodec` perangkat. Untuk transkrip offline, evaluasi runtime Android seperti sherpa-onnx dengan model kecil yang diunduh sesuai kebutuhan. Deteksi landmark wajah dapat ditambahkan sebagai modul opsional. Model tidak perlu dibundel di APK dasar.
+Analisis otomatis memerlukan deployment backend yang menerapkan kontrak di atas. Backend dapat menggunakan model open-source yang di-host sendiri untuk menghindari biaya per panggilan; biaya GPU/hosting tetap bergantung beban. Tidak ada backend gratis yang dapat dijamin dari repository ini. Face framing membutuhkan `face_crops`; active-speaker matching dan sinkronisasi bibir tetap harus disediakan backend.

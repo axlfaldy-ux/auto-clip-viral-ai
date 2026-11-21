@@ -205,7 +205,7 @@ fun MetadataStudioPage(
             item { EditableField("Bagikan", current.ctaShare) { save(current.copy(ctaShare = it)) } }
             item { EditableField("Follow", current.ctaFollow) { save(current.copy(ctaFollow = it)) } }
             item {
-                OutlinedButton(onClick = { regenerate() }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                OutlinedButton(onClick = { regenerate() }, enabled = transcript.isNotBlank(), modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
                     Text("Regenerate semua saran")
                 }
             }

@@ -9,6 +9,7 @@ data class TimedWord(
     val text: String,
     val startMs: Long,
     val endMs: Long,
+    val isEmphasis: Boolean = false,
 )
 
 data class ClipTranscript(

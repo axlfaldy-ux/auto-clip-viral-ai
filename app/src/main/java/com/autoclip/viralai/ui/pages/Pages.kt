@@ -1,10 +1,25 @@
 package com.autoclip.viralai.ui.pages
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.autoclip.viralai.domain.subtitles.SubtitlePresets
 import com.autoclip.viralai.domain.video.ClipSpecification
+import com.autoclip.viralai.data.VideoMediaProcessor
+import com.autoclip.viralai.data.VideoAnalysisClient
+import com.autoclip.viralai.data.RecommendedSegment
+import com.autoclip.viralai.domain.metadata.TimedWord
+import com.autoclip.viralai.domain.subtitles.SubtitleStyle
+import com.autoclip.viralai.domain.subtitles.TalkingHeadAnimation
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,18 +44,33 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Slider
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 
 @Composable
 fun HomePage(importedName: String?, onImport: () -> Unit, onResults: () -> Unit, modifier: Modifier = Modifier) {
@@ -93,7 +123,7 @@ fun HomePage(importedName: String?, onImport: () -> Unit, onResults: () -> Unit,
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(importedName, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                            Text("Video diimpor · analisis belum dijalankan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Video diimpor · pilih klip di Clip Results", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Text("›", color = MaterialTheme.colorScheme.primary, fontSize = 26.sp)
                     }
@@ -140,7 +170,67 @@ fun ImportVideoPage(
 }
 
 @Composable
-fun ClipResultsPage(importedName: String?, onImport: () -> Unit, modifier: Modifier = Modifier) {
+fun ClipResultsPage(
+    importedName: String?,
+    importedUri: String?,
+    apiEndpoint: String,
+    subtitlePresetId: String,
+    subtitleStyle: SubtitleStyle,
+    cameraAnimation: TalkingHeadAnimation,
+    onImport: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val processor = remember(context) { VideoMediaProcessor(context) }
+    val scope = rememberCoroutineScope()
+    var sourceDuration by rememberSaveable(importedUri) { mutableStateOf(0L) }
+    var startMs by rememberSaveable(importedUri) { mutableStateOf(0f) }
+    var selectedDuration by rememberSaveable(importedUri) { mutableStateOf(30_000f) }
+    var processing by remember { mutableStateOf(false) }
+    var resultMessage by remember { mutableStateOf<String?>(null) }
+    var analyzing by remember { mutableStateOf(false) }
+    var recommendations by remember(importedUri) { mutableStateOf<List<RecommendedSegment>>(emptyList()) }
+    var pendingExport by remember { mutableStateOf<Triple<Long, Long, List<TimedWord>>?>(null) }
+    val exportClip: (Long, Long, List<TimedWord>) -> Unit = { clipStart, clipLength, words ->
+        processing = true
+        resultMessage = "Mengekspor video…"
+        scope.launch {
+            runCatching {
+                processor.exportPortraitClip(
+                    Uri.parse(requireNotNull(importedUri)), clipStart, clipLength, words, subtitlePresetId,
+                    subtitleStyle, cameraAnimation,
+                    recommendations.firstOrNull { it.startMs == clipStart && it.endMs - it.startMs == clipLength }?.faceCrops.orEmpty(),
+                )
+            }
+                .onSuccess { resultMessage = "Video disimpan ke galeri: $it" }
+                .onFailure { if (it is CancellationException) throw it else resultMessage = "Ekspor gagal: ${it.message ?: "kesalahan tidak diketahui"}" }
+            processing = false
+        }
+    }
+    val writePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val request = pendingExport
+        pendingExport = null
+        if (granted && request != null) exportClip(request.first, request.second, request.third)
+        else if (!granted) resultMessage = "Izin penyimpanan diperlukan pada Android 9 dan lebih lama untuk menulis ke galeri."
+    }
+    val requestExport: (Long, Long, List<TimedWord>) -> Unit = { clipStart, clipLength, words ->
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P && context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            pendingExport = Triple(clipStart, clipLength, words)
+            writePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else exportClip(clipStart, clipLength, words)
+    }
+    LaunchedEffect(importedUri) {
+        sourceDuration = 0L
+        if (importedUri != null) {
+            runCatching { processor.durationMs(Uri.parse(importedUri)) }
+                .onSuccess { duration ->
+                    sourceDuration = duration
+                    selectedDuration = if (duration >= 1_000L) selectedDuration.coerceIn(1_000f, duration.toFloat()) else duration.toFloat()
+                    startMs = startMs.coerceIn(0f, (duration - selectedDuration.toLong()).coerceAtLeast(0L).toFloat())
+                }
+                .onFailure { if (it is CancellationException) throw it else resultMessage = it.message ?: "Video tidak dapat dibaca." }
+        }
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 28.dp),
@@ -151,6 +241,107 @@ fun ClipResultsPage(importedName: String?, onImport: () -> Unit, modifier: Modif
             Spacer(Modifier.height(8.dp))
             Text("Rangkaian pemrosesan video", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        if (importedUri != null && sourceDuration >= 1_000L) {
+            item {
+                SectionHeading("Analisis konten otomatis")
+                Text(
+                    if (apiEndpoint.isBlank()) "Isi URL backend HTTPS di Setelan untuk menjalankan seleksi klip. Video akan diunggah ke backend tersebut."
+                    else "Video akan dianalisis oleh backend yang dikonfigurasi. Hanya klip 30–60 detik dari respons valid yang ditawarkan.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = {
+                        analyzing = true
+                        resultMessage = "Mengunggah video dan meminta analisis…"
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    VideoAnalysisClient(context.contentResolver).analyze(
+                                        apiEndpoint,
+                                        Uri.parse(importedUri),
+                                        requestFaceTracking = cameraAnimation in setOf(
+                                            TalkingHeadAnimation.ACTIVE_SPEAKER,
+                                            TalkingHeadAnimation.AUTO_REFRAME,
+                                        ),
+                                        requestWordEmphasis = cameraAnimation == TalkingHeadAnimation.EMPHASIS_ZOOM,
+                                    )
+                                }
+                            }.onSuccess { clips ->
+                                val validClips = clips.filter { it.endMs <= sourceDuration && it.startMs >= 0L }
+                                recommendations = validClips
+                                resultMessage = if (validClips.isEmpty()) "Backend tidak mengembalikan kandidat valid berdurasi 30–60 detik dalam rentang video." else "Backend mengembalikan ${validClips.size} kandidat valid."
+                            }.onFailure { if (it is CancellationException) throw it else resultMessage = "Analisis gagal: ${it.message ?: "kesalahan tidak diketahui"}" }
+                            analyzing = false
+                        }
+                    },
+                    enabled = !analyzing && apiEndpoint.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                ) { Text(if (analyzing) "Menganalisis…" else "Analisis dan pilih klip") }
+                recommendations.forEachIndexed { index, candidate ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(16.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                            Text("Kandidat ${index + 1} · ${candidate.startMs / 1000}–${candidate.endMs / 1000} dtk · skor ${"%.2f".format(candidate.score)}", fontWeight = FontWeight.SemiBold)
+                            if (candidate.transcript.isNotBlank()) Text(candidate.transcript, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (candidate.words.isEmpty()) Text("Backend tidak mengirim timestamp kata; klip akan diekspor tanpa subtitle.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            if (cameraAnimation in setOf(TalkingHeadAnimation.ACTIVE_SPEAKER, TalkingHeadAnimation.AUTO_REFRAME) && candidate.faceCrops.isEmpty()) {
+                                Text("Backend tidak mengirim face_crops; pilih animasi lain atau ekspor tidak dapat menjalankan tracking.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    requestExport(candidate.startMs, candidate.endMs - candidate.startMs, candidate.words)
+                                },
+                                enabled = !processing && (cameraAnimation !in setOf(TalkingHeadAnimation.ACTIVE_SPEAKER, TalkingHeadAnimation.AUTO_REFRAME) || candidate.faceCrops.isNotEmpty()),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(if (candidate.words.isEmpty()) "Ekspor tanpa subtitle" else "Ekspor dengan subtitle ke galeri") }
+                        }
+                    }
+                }
+                resultMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            }
+            item {
+                SectionHeading("Potong dan ekspor")
+                Text("Durasi sumber: ${sourceDuration / 1000} detik", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val minClip = if (sourceDuration >= ClipSpecification.MIN_DURATION_MS) ClipSpecification.MIN_DURATION_MS else 1_000L
+                val maxClip = minOf(ClipSpecification.MAX_DURATION_MS, sourceDuration)
+                val safeDuration = selectedDuration.coerceIn(minClip.toFloat(), maxClip.toFloat())
+                Text("Durasi klip: ${safeDuration.toLong() / 1000} detik", fontWeight = FontWeight.SemiBold)
+                if (maxClip > minClip) {
+                    Slider(
+                        value = safeDuration,
+                        onValueChange = { selectedDuration = it; startMs = startMs.coerceAtMost((sourceDuration - it.toLong()).coerceAtLeast(0).toFloat()) },
+                        valueRange = minClip.toFloat()..maxClip.toFloat(),
+                        enabled = !processing,
+                    )
+                }
+                Text("Mulai: ${startMs.toLong() / 1000} detik", fontWeight = FontWeight.SemiBold)
+                Slider(
+                    value = startMs.coerceIn(0f, (sourceDuration - safeDuration.toLong()).coerceAtLeast(0).toFloat()),
+                    onValueChange = { startMs = it },
+                    valueRange = 0f..(sourceDuration - safeDuration.toLong()).coerceAtLeast(0).toFloat().coerceAtLeast(1f),
+                    enabled = !processing && sourceDuration > safeDuration,
+                )
+                Text(
+                    if (sourceDuration < ClipSpecification.MIN_DURATION_MS) "Sumber lebih pendek dari 30 detik; pemotongan manual tetap diizinkan sampai durasi sumber. Video di-crop tengah ke 1080×1920. Potongan manual tanpa subtitle."
+                    else "Video dipotong pada perangkat dan di-crop tengah ke 1080×1920. Potongan manual tanpa subtitle; hasil analisis dengan timestamp kata dapat merender preset subtitle.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (cameraAnimation in setOf(TalkingHeadAnimation.ACTIVE_SPEAKER, TalkingHeadAnimation.AUTO_REFRAME)) {
+                    Text("Analisis kandidat terlebih dahulu agar backend menyediakan keyframe wajah untuk mode ini.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                Button(
+                    onClick = {
+                        requestExport(startMs.toLong(), safeDuration.toLong(), emptyList())
+                    },
+                    enabled = !processing && safeDuration >= 1_000f && cameraAnimation !in setOf(TalkingHeadAnimation.ACTIVE_SPEAKER, TalkingHeadAnimation.AUTO_REFRAME),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                ) { Text(if (processing) "Memproses…" else "Potong dan simpan ke galeri") }
+                resultMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            }
+        }
         item {
             if (importedName == null) {
                 EmptyCard("Belum ada sumber video", "Impor video lokal untuk menyiapkan proyek.")
@@ -158,22 +349,15 @@ fun ClipResultsPage(importedName: String?, onImport: () -> Unit, modifier: Modif
                     Text("Impor video")
                 }
             } else {
-                EmptyCard("Video dipilih", "$importedName · hasil klip belum tersedia karena mesin pemrosesan belum dibuat.")
+                EmptyCard("Video dipilih", "$importedName · gunakan analisis backend atau potongan manual di atas.")
             }
         }
         item { SectionHeading("Spesifikasi yang disiapkan") }
-        item { PipelineStatus("Automatic viral clip selection", "Rentang kandidat ${ClipSpecification.MIN_DURATION_MS / 1000}–${ClipSpecification.MAX_DURATION_MS / 1000} detik; belum berjalan.", false) }
-        item { PipelineStatus("Active speaker face tracking", "Sinkronisasi aktivitas audio dan gerak bibir; belum berjalan.", false) }
-        item { PipelineStatus("Subtitle engine", "Delapan preset dapat dipilih. Animasi dan render kata belum berjalan.", true) }
+        item { PipelineStatus("Automatic viral clip selection", "Memerlukan backend analisis konten; ekspor potongan manual tersedia di atas.", false) }
+        item { PipelineStatus("Active speaker face tracking", "Berjalan dengan keyframe face_crops yang dikirim backend saat analisis.", apiEndpoint.isNotBlank()) }
+        item { PipelineStatus("Subtitle engine", "Delapan preset dirender ke video jika backend mengirim timestamp per kata.", true) }
         item { PipelineStatus("Viral metadata", "Generator aturan lokal tersedia dengan transkrip yang dimasukkan pengguna.", true) }
-        item { PipelineStatus("Video export", "${ClipSpecification.OUTPUT_WIDTH}×${ClipSpecification.OUTPUT_HEIGHT} (9:16); ekspor belum berjalan.", false) }
-        item {
-            Text(
-                "Satu transkrip bertimestamp akan dipakai bersama untuk pemilihan klip, speaker tracking, subtitle, dan metadata saat mesin analisis ditambahkan.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        item { PipelineStatus("Video export", "Potong manual ke ${ClipSpecification.OUTPUT_WIDTH}×${ClipSpecification.OUTPUT_HEIGHT} (9:16) dan simpan ke galeri.", true) }
     }
 }
 
@@ -200,9 +384,19 @@ private fun PipelineStatus(title: String, detail: String, available: Boolean) {
 }
 
 @Composable
-fun SubtitleStudioPage(selectedTemplate: String, onSelectTemplate: (String) -> Unit, modifier: Modifier = Modifier) {
+fun SubtitleStudioPage(
+    selectedTemplate: String,
+    selectedAnimation: TalkingHeadAnimation,
+    style: SubtitleStyle,
+    onStyleChange: (SubtitleStyle) -> Unit,
+    onAnimationChange: (TalkingHeadAnimation) -> Unit,
+    onSelectTemplate: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val selected = SubtitlePresets.all.firstOrNull { it.displayName == selectedTemplate }
-        ?: SubtitlePresets.all.first { it.id == "karaoke" }
+        ?: SubtitlePresets.all.first { it.id == "classic" }
+    var textColorHex by rememberSaveable(style.textArgb) { mutableStateOf(style.textArgb.toHexColor()) }
+    var outlineColorHex by rememberSaveable(style.outlineArgb) { mutableStateOf(style.outlineArgb.toHexColor()) }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 28.dp),
@@ -218,9 +412,48 @@ fun SubtitleStudioPage(selectedTemplate: String, onSelectTemplate: (String) -> U
                 Column(Modifier.fillMaxWidth().height(172.dp).padding(18.dp), verticalArrangement = Arrangement.SpaceBetween) {
                     Text("PRATINJAU  ·  ${selected.displayName}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 1.sp)
                     Surface(color = Color.Black.copy(alpha = 0.55f), shape = RoundedCornerShape(10.dp), modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text(selected.previewText, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), color = Color(selected.accentArgb), fontWeight = FontWeight.Bold)
+                        SubtitleFontPreview(selected.previewText, selected.fontAsset, style, selected.id, Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
                     }
-                    Text("Animasi: ${selected.animation.label}. Pratinjau statis; renderer belum tersedia.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${selected.animation.label} · ${selected.displayName}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            SectionHeading("Ukuran, warna, outline, shadow, dan posisi")
+            Text("Ukuran ${(style.sizeFraction * 100).toInt()}% dari tinggi video", style = MaterialTheme.typography.bodySmall)
+            Slider(value = style.sizeFraction, onValueChange = { onStyleChange(style.copy(sizeFraction = it)) }, valueRange = 0.025f..0.075f)
+            OutlinedTextField(
+                value = textColorHex,
+                onValueChange = { value -> textColorHex = value; value.toArgbColor()?.let { onStyleChange(style.copy(textArgb = it)) } },
+                label = { Text("Warna teks (#RRGGBB)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = outlineColorHex,
+                onValueChange = { value -> outlineColorHex = value; value.toArgbColor()?.let { onStyleChange(style.copy(outlineArgb = it)) } },
+                label = { Text("Warna outline (#RRGGBB)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Text("Ketebalan outline ${(style.outlineFraction * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+            Slider(value = style.outlineFraction, onValueChange = { onStyleChange(style.copy(outlineFraction = it)) }, valueRange = 0f..0.008f)
+            Text("Shadow ${(style.shadowFraction * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+            Slider(value = style.shadowFraction, onValueChange = { onStyleChange(style.copy(shadowFraction = it)) }, valueRange = 0f..0.015f)
+            Text("Posisi vertikal ${(style.positionFraction * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+            Slider(value = style.positionFraction, onValueChange = { onStyleChange(style.copy(positionFraction = it)) }, valueRange = 0.62f..0.94f)
+        }
+        item {
+            SectionHeading("Talking head movement")
+            Text("Tracking wajah memerlukan face_crops dari respons analisis backend. Gerak zoom lain dirender lokal.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Jump Cut saat ini mengubah framing secara berkala; pemotongan jeda suara dan transisi antar klip belum tersedia.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
+                items(TalkingHeadAnimation.entries) { animation ->
+                    FilterChip(
+                        selected = selectedAnimation == animation,
+                        onClick = { onAnimationChange(animation) },
+                        label = { Text(animation.label) },
+                    )
                 }
             }
         }
@@ -253,7 +486,55 @@ fun SubtitleStudioPage(selectedTemplate: String, onSelectTemplate: (String) -> U
 }
 
 @Composable
-fun SettingsPage(modifier: Modifier = Modifier) {
+private fun SubtitleFontPreview(text: String, fontAsset: String, style: SubtitleStyle, presetId: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val typeface = remember(fontAsset) { Typeface.createFromAsset(context.assets, fontAsset) }
+    val preset = remember(presetId) { SubtitlePresets.all.firstOrNull { it.id == presetId } }
+    Canvas(modifier.fillMaxWidth().height(54.dp)) {
+        val canvas = drawContext.canvas.nativeCanvas
+        val line = text.replace('\n', ' ')
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            this.typeface = Typeface.create(typeface, if (presetId == "bold_viral" || presetId == "impact") Typeface.BOLD else Typeface.NORMAL)
+            val presetSize = if (presetId == "bold_viral" || presetId == "impact") 1.12f else 1f
+            val animationSize = if (preset?.animation == com.autoclip.viralai.domain.subtitles.SubtitleAnimation.SCALE_POP ||
+                preset?.animation == com.autoclip.viralai.domain.subtitles.SubtitleAnimation.WORD_POP
+            ) 1.08f else 1f
+            textSize = size.height * 0.52f * (style.sizeFraction / 0.046f) * presetSize * animationSize
+            color = style.textArgb.toInt()
+            setShadowLayer(
+                textSize * style.shadowFraction / style.sizeFraction,
+                0f,
+                textSize * style.shadowFraction / style.sizeFraction * 0.55f,
+                style.outlineArgb.toInt(),
+            )
+        }
+        val centerX = size.width / 2f
+        val baseline = size.height * style.positionFraction
+        val shown = if (presetId == "bold_viral" || presetId == "impact") line.uppercase() else line
+        if (style.outlineFraction > 0f) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeJoin = Paint.Join.ROUND
+            paint.strokeWidth = textSize * style.outlineFraction / style.sizeFraction
+            paint.color = style.outlineArgb.toInt()
+            canvas.drawText(shown, centerX, baseline, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = style.textArgb.toInt()
+        }
+        canvas.drawText(shown, centerX, baseline, paint)
+    }
+}
+
+private fun Long.toHexColor(): String = "#%06X".format(this and 0xFFFFFFL)
+
+private fun String.toArgbColor(): Long? {
+    val digits = trim().removePrefix("#")
+    if (digits.length != 6) return null
+    return runCatching { 0xFF000000L or digits.toLong(16) }.getOrNull()
+}
+
+@Composable
+fun SettingsPage(apiEndpoint: String, onApiEndpointChange: (String) -> Unit, modifier: Modifier = Modifier) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 28.dp),
@@ -274,7 +555,19 @@ fun SettingsPage(modifier: Modifier = Modifier) {
         item {
             SectionHeading("Pemrosesan")
             Spacer(Modifier.height(8.dp))
-            EmptyCard("Lokal dan tanpa API berbayar", "Tahap UI ini belum menjalankan analisis, pelacakan wajah, atau ekspor video.")
+            EmptyCard("Pemrosesan video lokal", "Potong, crop 9:16, dan simpan hasil ke galeri tanpa mengunggah video.")
+            Spacer(Modifier.height(12.dp))
+            SectionHeading("Backend analisis AI")
+            OutlinedTextField(
+                value = apiEndpoint,
+                onValueChange = onApiEndpointChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("URL dasar backend HTTPS") },
+                placeholder = { Text("https://api.example.com") },
+                supportingText = { Text("Video dikirim ke endpoint /v1/analyze. Jangan masukkan API key di aplikasi; lindungi kredensial di backend.") },
+                singleLine = true,
+            )
+            Text("Backend harus mengembalikan kandidat 30–60 detik dengan start_ms, end_ms, score, dan transcript. Lihat kontrak API di docs/ARCHITECTURE.md.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
